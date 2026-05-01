@@ -1,27 +1,28 @@
 use super::*;
+use crate::JsonSchema;
 use codex_app_server_protocol::AppInfo;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::BTreeMap;
 
 #[test]
-fn create_tool_search_tool_deduplicates_and_renders_enabled_apps() {
+fn create_tool_search_tool_deduplicates_and_renders_enabled_sources() {
     assert_eq!(
         create_tool_search_tool(
             &[
-                ToolSearchAppInfo {
+                ToolSearchSourceInfo {
                     name: "Google Drive".to_string(),
                     description: Some(
                         "Use Google Drive as the single entrypoint for Drive, Docs, Sheets, and Slides work."
                             .to_string(),
                     ),
                 },
-                ToolSearchAppInfo {
+                ToolSearchSourceInfo {
                     name: "Google Drive".to_string(),
                     description: None,
                 },
-                ToolSearchAppInfo {
-                    name: "Slack".to_string(),
+                ToolSearchSourceInfo {
+                    name: "docs".to_string(),
                     description: None,
                 },
             ],
@@ -29,34 +30,52 @@ fn create_tool_search_tool_deduplicates_and_renders_enabled_apps() {
         ),
         ToolSpec::ToolSearch {
             execution: "client".to_string(),
-            description: "# Apps (Connectors) tool discovery\n\nSearches over apps/connectors tool metadata with BM25 and exposes matching tools for the next model call.\n\nYou have access to all the tools of the following apps/connectors:\n- Google Drive: Use Google Drive as the single entrypoint for Drive, Docs, Sheets, and Slides work.\n- Slack\nSome of the tools may not have been provided to you upfront, and you should use this tool (`tool_search`) to search for the required tools and load them for the apps mentioned above. For the apps mentioned above, always use `tool_search` instead of `list_mcp_resources` or `list_mcp_resource_templates` for tool discovery.".to_string(),
-            parameters: JsonSchema::Object {
-                properties: BTreeMap::from([
+            description: "# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nYou have access to tools from the following sources:\n- Google Drive: Use Google Drive as the single entrypoint for Drive, Docs, Sheets, and Slides work.\n- docs\nSome of the tools may not have been provided to you upfront, and you should use this tool (`tool_search`) to search for the required tools. For MCP tool discovery, always use `tool_search` instead of `list_mcp_resources` or `list_mcp_resource_templates`.".to_string(),
+            parameters: JsonSchema::object(BTreeMap::from([
                     (
                         "limit".to_string(),
-                        JsonSchema::Number {
-                            description: Some(
+                        JsonSchema::number(Some(
                                 "Maximum number of tools to return (defaults to 8)."
                                     .to_string(),
-                            ),
-                        },
+                            ),),
                     ),
                     (
                         "query".to_string(),
-                        JsonSchema::String {
-                            description: Some("Search query for apps tools.".to_string()),
-                        },
+                        JsonSchema::string(Some("Search query for deferred tools.".to_string()),),
                     ),
-                ]),
-                required: Some(vec!["query".to_string()]),
-                additional_properties: Some(false.into()),
-            },
+                ]), Some(vec!["query".to_string()]), Some(false.into())),
         }
     );
 }
 
 #[test]
 fn create_tool_suggest_tool_uses_plugin_summary_fallback() {
+    let expected_description = concat!(
+        "# Tool suggestion discovery\n\n",
+        "Use this tool only to ask the user to install one known plugin or connector from the list below. The list contains known candidates that are not currently installed.\n\n",
+        "Use this ONLY when all of the following are true:\n",
+        "- The user explicitly wants a specific plugin or connector that is not already available in the current context or active `tools` list.\n",
+        "- `tool_search` is not available, or it has already been called and did not find or make the requested tool callable.\n",
+        "- The tool is one of the known installable plugins or connectors listed below. Only ask to install tools from this list.\n\n",
+        "Do not use tool suggestion for adjacent capabilities, broad recommendations, or tools that merely seem useful. The user's intent must clearly match one listed tool.\n\n",
+        "Known plugins/connectors available to install:\n",
+        "- GitHub (id: `github`, type: plugin, action: install): skills; MCP servers: github-mcp; app connectors: github-app\n",
+        "- Slack (id: `slack@openai-curated`, type: connector, action: install): No description provided.\n\n",
+        "Workflow:\n\n",
+        "1. Check the current context and active `tools` list first. If `tool_search` is available, call `tool_search` before calling `tool_suggest`. Do not use tool suggestion if the needed tool is already available, found through `tool_search`, or callable after discovery.\n",
+        "2. Match the user's explicit request against the known plugin/connector list above. Only proceed when one listed plugin or connector exactly fits.\n",
+        "3. If we found both connectors and plugins to suggest, use plugins first, only use connectors if the corresponding plugin is installed but the connector is not.\n",
+        "4. If one tool clearly fits, call `tool_suggest` with:\n",
+        "   - `tool_type`: `connector` or `plugin`\n",
+        "   - `action_type`: `install`\n",
+        "   - `tool_id`: exact id from the known plugin/connector list above\n",
+        "   - `suggest_reason`: concise one-line user-facing reason this tool can help with the current request\n",
+        "5. After the suggestion flow completes:\n",
+        "   - if the user finished the install flow, continue by searching again or using the newly available tool\n",
+        "   - if the user did not finish, continue without that tool, and don't suggest that tool again unless the user explicitly asks for it.\n\n",
+        "IMPORTANT: DO NOT call this tool in parallel with other tools.",
+    );
+
     assert_eq!(
         create_tool_suggest_tool(&[
             ToolSuggestEntry {
@@ -80,56 +99,44 @@ fn create_tool_suggest_tool_uses_plugin_summary_fallback() {
         ]),
         ToolSpec::Function(ResponsesApiTool {
             name: "tool_suggest".to_string(),
-            description: "# Tool suggestion discovery\n\nSuggests a missing connector in an installed plugin, or in narrower cases a not installed but discoverable plugin, when the user clearly wants a capability that is not currently available in the active `tools` list.\n\nUse this ONLY when:\n- You've already tried to find a matching available tool for the user's request but couldn't find a good match. This includes `tool_search` (if available) and other means.\n- For connectors/apps that are not installed but needed for an installed plugin, suggest to install them if the task requirements match precisely.\n- For plugins that are not installed but discoverable, only suggest discoverable and installable plugins when the user's intent very explicitly and unambiguously matches that plugin itself. Do not suggest a plugin just because one of its connectors or capabilities seems relevant.\n\nTool suggestions should only use the discoverable tools listed here. DO NOT explore or recommend tools that are not on this list.\n\nDiscoverable tools:\n- GitHub (id: `github`, type: plugin, action: install): skills; MCP servers: github-mcp; app connectors: github-app\n- Slack (id: `slack@openai-curated`, type: connector, action: install): No description provided.\n\nWorkflow:\n\n1. Ensure all possible means have been exhausted to find an existing available tool but none of them matches the request intent.\n2. Match the user's request against the discoverable tools list above. Apply the stricter explicit-and-unambiguous rule for *discoverable tools* like plugin install suggestions; *missing tools* like connector install suggestions continue to use the normal clear-fit standard.\n3. If one tool clearly fits, call `tool_suggest` with:\n   - `tool_type`: `connector` or `plugin`\n   - `action_type`: `install` or `enable`\n   - `tool_id`: exact id from the discoverable tools list above\n   - `suggest_reason`: concise one-line user-facing reason this tool can help with the current request\n4. After the suggestion flow completes:\n   - if the user finished the install or enable flow, continue by searching again or using the newly available tool\n   - if the user did not finish, continue without that tool, and don't suggest that tool again unless the user explicitly asks for it.".to_string(),
+            description: expected_description.to_string(),
             strict: false,
             defer_loading: None,
-            parameters: JsonSchema::Object {
-                properties: BTreeMap::from([
+            parameters: JsonSchema::object(BTreeMap::from([
                     (
                         "action_type".to_string(),
-                        JsonSchema::String {
-                            description: Some(
-                                "Suggested action for the tool. Use \"install\" or \"enable\"."
+                        JsonSchema::string(Some(
+                                "Suggested action for the tool. Use \"install\"."
                                     .to_string(),
-                            ),
-                        },
+                            ),),
                     ),
                     (
                         "suggest_reason".to_string(),
-                        JsonSchema::String {
-                            description: Some(
+                        JsonSchema::string(Some(
                                 "Concise one-line user-facing reason why this tool can help with the current request."
                                     .to_string(),
-                            ),
-                        },
+                            ),),
                     ),
                     (
                         "tool_id".to_string(),
-                        JsonSchema::String {
-                            description: Some(
-                                "Connector or plugin id to suggest. Must be one of: slack@openai-curated, github."
+                        JsonSchema::string(Some(
+                                "Connector or plugin id to suggest."
                                     .to_string(),
-                            ),
-                        },
+                            ),),
                     ),
                     (
                         "tool_type".to_string(),
-                        JsonSchema::String {
-                            description: Some(
+                        JsonSchema::string(Some(
                                 "Type of discoverable tool to suggest. Use \"connector\" or \"plugin\"."
                                     .to_string(),
-                            ),
-                        },
+                            ),),
                     ),
-                ]),
-                required: Some(vec![
+                ]), Some(vec![
                     "tool_type".to_string(),
                     "action_type".to_string(),
                     "tool_id".to_string(),
                     "suggest_reason".to_string(),
-                ]),
-                additional_properties: Some(false.into()),
-            },
+                ]), Some(false.into())),
             output_schema: None,
         })
     );
